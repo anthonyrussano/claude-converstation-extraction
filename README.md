@@ -1,6 +1,14 @@
-# Extracting Claude Shared Conversation Content
+# Extracting Shared Conversation Content
 
-Last updated: 2026-05-20
+Last updated: 2026-05-29
+
+This repository documents repeatable ways to extract public shared-chat
+transcripts into local files. It currently covers:
+
+- Claude shared conversations
+- ChatGPT shared conversations
+
+## Claude Shared Conversations
 
 This documents the procedure that successfully extracted a Claude shared-chat transcript from a URL like:
 
@@ -458,4 +466,138 @@ or:
 
 ```bash
 SHARE_ID='fbe3711d-104f-4478-b1da-d5875282a971' xvfb-run -a node -e "..."
+```
+
+## ChatGPT Shared Conversations
+
+This documents the procedure that successfully extracted a ChatGPT shared-chat transcript from a URL like:
+
+```text
+https://chatgpt.com/share/6a1a1e2e-17f8-83e8-8f2b-2c4c187db51b
+```
+
+The ChatGPT share page is also a JavaScript-rendered app. A direct text fetch can return only the shell or an incomplete view. The reliable approach was to render the page with Playwright/Chromium under `xvfb-run`, then extract rendered message elements from the DOM.
+
+The useful selector observed on 2026-05-29 was:
+
+```text
+[data-message-author-role]
+```
+
+Each matching element had:
+
+```text
+data-message-author-role="user" | "assistant"
+data-message-id="<uuid>"
+innerText=<visible message text>
+```
+
+### ChatGPT Caveats
+
+Shared ChatGPT pages may show attachment markers such as:
+
+```text
+Uploaded a file
+Pasted text
+```
+
+Those markers can appear in the rendered transcript even when the underlying uploaded file or original pasted artifact is not exposed as a separate raw artifact. If the user's requested output depends on an uploaded file, ask for the file or inspect a local copy if one is available.
+
+### ChatGPT Extraction Command
+
+Use a temp directory so the project repo is not modified by dependency installs:
+
+```bash
+mkdir -p /tmp/chatgpt-playwright
+cd /tmp/chatgpt-playwright
+npm install playwright@1.58.2
+```
+
+If Chromium is not already installed:
+
+```bash
+npx playwright@1.58.2 install chromium
+```
+
+Then run this command, replacing `SHARE_URL` and `OUTPUT_PATH`:
+
+```bash
+export SHARE_URL='https://chatgpt.com/share/6a1a1e2e-17f8-83e8-8f2b-2c4c187db51b'
+export OUTPUT_PATH='/tmp/chatgpt_share_transcript.md'
+
+xvfb-run -a node -e '
+const { chromium } = require("playwright");
+const fs = require("fs");
+
+const shareUrl = process.env.SHARE_URL;
+const outputPath = process.env.OUTPUT_PATH || "/tmp/chatgpt_share_transcript.md";
+
+(async () => {
+  const browser = await chromium.launch({ headless: false });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1800 } });
+
+  await page.goto(shareUrl, { waitUntil: "networkidle", timeout: 60000 });
+  await page.waitForTimeout(5000);
+
+  const title = await page.title();
+  const messages = await page.evaluate(() =>
+    [...document.querySelectorAll("[data-message-author-role]")].map((el, i) => ({
+      index: i + 1,
+      role: el.getAttribute("data-message-author-role"),
+      id: el.getAttribute("data-message-id"),
+      text: el.innerText
+    }))
+  );
+
+  if (!messages.length) {
+    throw new Error("no ChatGPT message elements were found");
+  }
+
+  const lines = [];
+  lines.push(`# ChatGPT Shared Conversation: ${title || "Untitled"}`);
+  lines.push("");
+  lines.push(`Source: ${shareUrl}`);
+  lines.push("");
+
+  for (const message of messages) {
+    const role = message.role === "user" ? "User" : "Assistant";
+    lines.push(`## Turn ${message.index}: ${role}`);
+    lines.push("");
+    lines.push(`Message ID: \`${message.id || ""}\``);
+    lines.push("");
+    lines.push("~~~~text");
+    lines.push((message.text || "").trim());
+    lines.push("~~~~");
+    lines.push("");
+  }
+
+  fs.writeFileSync(outputPath, lines.join("\n"));
+  console.log(outputPath);
+  console.log(`messages: ${messages.length}`);
+
+  await browser.close();
+})().catch(e => {
+  console.error(e);
+  process.exit(1);
+});
+'
+```
+
+The `~~~~text` fence is intentional. ChatGPT responses often contain Markdown code fences. Using tilde fences reduces the chance that embedded triple backticks will break the generated transcript Markdown.
+
+### ChatGPT Troubleshooting
+
+If direct HTML extraction misses messages, use Playwright and the rendered DOM selector above.
+
+If `document.querySelectorAll("[data-message-author-role]")` returns no messages, save the rendered page for inspection:
+
+```js
+fs.writeFileSync("/tmp/chatgpt_share_dom.html", await page.content());
+fs.writeFileSync("/tmp/chatgpt_share_body.txt", await page.locator("body").innerText());
+```
+
+Then inspect for current selectors:
+
+```bash
+rg 'data-message-author-role|data-message-id|conversation-turn|markdown' /tmp/chatgpt_share_dom.html
 ```
